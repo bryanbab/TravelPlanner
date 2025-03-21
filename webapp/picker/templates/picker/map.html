@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pick a Location</title>
+    <!-- Leaflet CSS for map styling -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.js"></script>
+    <style>
+        /* Basic styling for the body */
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f4f4f4;
+            color: #333;
+        }
+
+        h1 {
+            text-align: center;
+            margin-top: 20px;
+            color: #2d3e50;
+        }
+
+        /* Container for the map and search bar */
+        .container {
+            width: 90%;
+            max-width: 1200px;
+            margin: 30px auto;
+            padding: 10px;
+            background-color: #ffffff;
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        .search-bar input {
+            width: 60%;
+            padding: 10px;
+            font-size: 16px;
+            border: 2px solid #ddd;
+            border-radius: 5px;
+            outline: none;
+            transition: border-color 0.3s;
+        }
+
+        .search-bar input:focus {
+            border-color: #007bff;
+        }
+
+        /* Map container styling */
+        #map {
+            height: 500px;
+            border-radius: 8px;
+        }
+
+        /* Button Styling */
+        button {
+            padding: 12px 24px;
+            font-size: 16px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+
+        button:hover {
+            background-color: #0056b3;
+        }
+
+        /*!* Form container styling *!*/
+        /*.form-container {*/
+        /*    text-align: center;*/
+        /*    margin-top: 20px;*/
+        /*}*/
+    </style>
+</head>
+<body>
+
+    <h1>Pick a Location</h1>
+
+    <div class="container">
+
+        <!-- Map -->
+        <div id="map"></div>
+
+        <!-- Hidden form to store coordinates -->
+        <div class="form-container">
+            <form method="POST" action="{% url 'save_location' %}">
+                {% csrf_token %}
+                <input type="hidden" id="latitude" name="latitude">
+                <input type="hidden" id="longitude" name="longitude">
+                <button type="submit">Save Location</button>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        // Initialize the map
+        var map = L.map('map').setView([51.505, -0.09], 13);  // Default to London
+
+        // Set OpenStreetMap tiles
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+        }).addTo(map);
+
+        // Add Geocoder (Search) control
+        var geocoder = L.Control.Geocoder.nominatim();
+        L.Control.geocoder({
+            query: '',
+            placeholder: 'Search for a location',
+            icon: 'leaflet-control-geocoder-icon'
+        })
+        .on('markgeocode', function(e) {
+            var lat = e.geocode.center.lat;
+            var lon = e.geocode.center.lng;
+
+            // Update the hidden input fields with the lat and lon
+            document.getElementById('latitude').value = lat;
+            document.getElementById('longitude').value = lon;
+
+            // Optionally, add a marker at the location
+            L.marker([lat, lon]).addTo(map).bindPopup(e.geocode.name).openPopup();
+
+            // Move the map to the new location
+            map.setView([lat, lon], 13);
+        })
+        .addTo(map);
+
+        // Optionally, you can also add an event listener for the search bar input
+        document.getElementById('searchInput').addEventListener('input', function() {
+            // When the user types in the search input, trigger the geocoder
+            var query = document.getElementById('searchInput').value;
+            geocoder.geocode(query, function(results) {
+                if (results.length > 0) {
+                    var bestResult = results[0];
+                    var lat = bestResult.center.lat;
+                    var lon = bestResult.center.lng;
+
+                    // Update the latitude and longitude hidden inputs
+                    document.getElementById('latitude').value = lat;
+                    document.getElementById('longitude').value = lon;
+
+                    // Add a marker for the result
+                    L.marker([lat, lon]).addTo(map).bindPopup(bestResult.name).openPopup();
+
+                    // Move the map to the result
+                    map.setView([lat, lon], 13);
+                }
+            });
+        });
+    </script>
+
+</body>
+</html>

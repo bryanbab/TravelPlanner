@@ -2,3 +2,5 @@
 .vscode
 env
 venv
+cache
+.DS_Store
