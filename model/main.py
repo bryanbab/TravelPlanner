@@ -51,6 +51,41 @@ THEMES = {
     "religious": {"building": ["church", "mosque", "synagogue"]}
 }
 
+# ==== USER PREFERENCE CLASS ====
+class UserPreferences:
+    def __init__(self):
+        # Default weights for objective function components
+        self.weights = {
+            "distance": 0.3,        # Preference for shorter routes
+            "poi_count": 0.2,        # Preference for more POIs
+            "theme_alignment": 0.3,  # How well POIs match preferred themes
+            "daily_pace": 0.2,       # Preference for comfortable daily schedule
+        }
+        
+        # Theme preferences (1-10 scale for each theme)
+        self.theme_preferences = {
+            "education": 5,          # Schools, colleges, universities
+            "healthcare": 5,         # Hospitals, clinics
+            "tourism": 5,            # Attractions, museums
+            "religious": 5,          # Churches, mosques, synagogues
+        }
+        
+        # Budget preferences
+        self.budget_level = 5        # 1-10 scale (1=budget, 10=luxury)
+        self.max_daily_spending = 200  # in chosen currency
+        
+        # Trip constraints
+        self.trip_duration_days = 7
+        self.max_daily_driving_hours = 4
+        self.max_daily_pois = 5      # Maximum POIs to visit per day
+        
+        # POI preferences
+        self.min_poi_rating = 3.5    # Minimum acceptable rating (1-5 scale)
+        
+        # Route style
+        self.route_type = "loop"     # "loop" or "one-way"
+        self.prefer_scenic_routes = True
+
 
 # ==== ROUTE GEOMETRY HANDLING ====
 def get_route_geometry(start_coord, end_coord):
@@ -174,6 +209,64 @@ def neighbor_function(current_config):
 
     return new_config
 
+def calculate_score(route, config, user_prefs):
+    """Score a route based on multiple factors weighted by user preferences"""
+    if not route:
+        return float('-inf')
+    
+    # Extract route metrics
+    poi_count = len(route['waypoints']) - 2  # Excluding start/end
+    route_length = route['distance']  # in meters
+    pois = route['pois']  # Assuming you store POI details including theme info
+    
+    # === DISTANCE SCORE ===
+    # Lower is better, normalize to 0-1 range (inverted)
+    max_acceptable_distance = 1000 * config.segment_km * (user_prefs.trip_duration_days - 1)
+    distance_score = 1 - min(1, route_length / max_acceptable_distance)
+    
+    # === POI COUNT SCORE ===
+    # More POIs is better, but diminishing returns after preferred density
+    preferred_poi_density = user_prefs.max_daily_pois * user_prefs.trip_duration_days
+    poi_count_score = min(1, poi_count / preferred_poi_density)
+    
+    # === THEME ALIGNMENT SCORE ===
+    # How well POIs match user's theme preferences
+    if poi_count > 0 and hasattr(pois[0], 'theme'):
+        theme_scores = []
+        for poi in pois:
+            # Get user's preference score for this POI's theme (1-10 scale)
+            theme_pref = user_prefs.theme_preferences.get(poi.theme, 5)  # Default to 5 if theme not found
+            theme_scores.append(theme_pref / 10)  # Normalize to 0-1
+        
+        # Average theme preference across all POIs
+        theme_alignment_score = sum(theme_scores) / len(theme_scores)
+    else:
+        # If POIs don't have theme data, use the route's configured theme
+        theme_alignment_score = user_prefs.theme_preferences.get(config.theme, 5) / 10
+    
+    # === DAILY PACE SCORE ===
+    # How well the route matches preferred daily pace
+    days_required = max(1, poi_count / user_prefs.max_daily_pois)
+    
+    if days_required > user_prefs.trip_duration_days:
+        # Too many POIs for trip duration - penalize
+        daily_pace_score = user_prefs.trip_duration_days / days_required
+    else:
+        # Good fit or under capacity
+        utilization = days_required / user_prefs.trip_duration_days
+        # Score is highest around 80-90% utilization
+        daily_pace_score = 1 - abs(0.85 - utilization)
+    
+    # === COMBINED WEIGHTED SCORE ===
+    # Apply user's weights to each component
+    final_score = (
+        user_prefs.weights["distance"] * distance_score +
+        user_prefs.weights["poi_count"] * poi_count_score +
+        user_prefs.weights["theme_alignment"] * theme_alignment_score +
+        user_prefs.weights["daily_pace"] * daily_pace_score
+    )
+    
+    return final_score
 
 # ==== EXAMPLE USAGE ====
 if __name__ == "__main__":
