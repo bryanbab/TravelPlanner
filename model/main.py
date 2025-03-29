@@ -6,7 +6,7 @@ import requests
 import numpy as np
 import random
 import copy
-
+import math
 
 # ==== CONFIGURATION CLASS ====
 class RouteConfig:
@@ -139,6 +139,8 @@ def query_pois_for_segment(segment, theme, buffer_km):
 
 def sample_pois(pois, min_pois, max_pois):
     """Random selection with constraints"""
+    if not pois or len(pois) < min_pois:
+        return []
     k = random.randint(min_pois, min(max_pois, len(pois)))
     return random.sample(pois, k) if pois else []
 
@@ -158,7 +160,11 @@ def generate_route(start, end, pois, daily_capacity):
     url = f"http://router.project-osrm.org/route/v1/driving/{coord_str}?overview=full"
     try:
         response = requests.get(url).json()
-        return response["routes"][0]["geometry"] if response["code"] == "Ok" else None
+        return {
+            "geometry": LineString([...]),
+            "distance": response["routes"][0]["distance"],
+            "waypoints": coords
+        }if response["code"] == "Ok" else None
     except:
         return None
 
@@ -187,8 +193,11 @@ def generate_random_route(start_city, end_city=None, config=RouteConfig()):
     sampled_pois = sample_pois(unique_pois, config.min_pois, config.max_pois)
 
     # Generate final route
-    return generate_route(start, end, sampled_pois, config.daily_capacity)
-
+    final_route = generate_route(start, end, sampled_pois, config.daily_capacity)
+    if not final_route:
+        return None
+    final_route["pois"] = sampled_pois
+    return final_route
 
 # ==== SIMULATED ANNEALING UTILITIES ====
 def neighbor_function(current_config):
@@ -268,6 +277,14 @@ def calculate_score(route, config, user_prefs):
     
     return final_score
 
+def acceptance_criteria(current_score, new_score, temperature):
+    if new_score > current_score:
+        return True
+    else:
+        delta = new_score - current_score
+        prob = math.exp(delta / temperature)
+        return random.random() < prob
+
 # ==== EXAMPLE USAGE ====
 if __name__ == "__main__":
     # Initial configuration
@@ -275,6 +292,8 @@ if __name__ == "__main__":
 
     # Generate initial random route
     route_geo = generate_random_route("Berlin", "Munich", config)
+    user_prefs = UserPreferences()
+    temperature = 100
 
     # Simulated annealing loop sketch
     for iteration in range(100):
@@ -283,8 +302,9 @@ if __name__ == "__main__":
         print('generated route')
         # Here you would compare routes using objective function
         # and decide whether to keep new configuration
-        # current_score = calculate_score(route_geo, config)
-        # new_score = calculate_score(new_route, new_config)
-        # if acceptance_criteria(current_score, new_score, temperature):
-        #     config = new_config
-        #     route_geo = new_route
+        current_score = calculate_score(route_geo, config, user_prefs)
+        new_score = calculate_score(new_route, new_config, user_prefs)
+        if acceptance_criteria(current_score, new_score, temperature):
+            config = new_config
+            route_geo = new_route
+        temperature *= 95
