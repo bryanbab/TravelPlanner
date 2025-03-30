@@ -7,6 +7,8 @@ import numpy as np
 import random
 import copy
 
+import display_util
+
 
 # ==== CONFIGURATION CLASS ====
 class RouteConfig:
@@ -15,12 +17,14 @@ class RouteConfig:
         self.min_pois = 2  # Minimum POIs per route
         self.max_pois = 8  # Maximum POIs per route
         self.daily_capacity = 3  # Stops per day simulation
-        self.segment_km = 80  # Route splitting granularity
+        self.segment_km = 16  # Route splitting granularity
         self.theme = "education"  # Default theme
 
 
 # ==== GEOCODING UTILITIES ====
 geolocator = Nominatim(user_agent="travel_annealing")
+overpass_url = "http://localhost:12347/api/interpreter"
+osrm_url = "http://localhost:5050/route/v1/driving/"
 
 
 def geocode_city(city_name):
@@ -55,7 +59,7 @@ THEMES = {
 # ==== ROUTE GEOMETRY HANDLING ====
 def get_route_geometry(start_coord, end_coord):
     """Get actual road route geometry using OSRM"""
-    url = f"http://router.project-osrm.org/route/v1/driving/{start_coord[0]},{start_coord[1]};{end_coord[0]},{end_coord[1]}?overview=full&geometries=geojson"
+    url = f"{osrm_url}{start_coord[0]},{start_coord[1]};{end_coord[0]},{end_coord[1]}?overview=full&geometries=geojson"
     try:
         response = requests.get(url).json()
         if response["code"] == "Ok":
@@ -71,11 +75,6 @@ def split_route_into_segments(route, segment_length_km=16):
     return [LineString([route.interpolate(i), route.interpolate(i + segment_length)])
             for i in np.arange(0, route.length, segment_length)]
 
-
-# ==== POI HANDLING ====
-api = overpass.API()
-
-
 def query_pois_for_segment(segment, theme, buffer_km):
     """Query POIs in buffered corridor around route segment"""
     buffer_deg = buffer_km * 1000 / 111320  # Approximate degree conversion
@@ -88,17 +87,12 @@ def query_pois_for_segment(segment, theme, buffer_km):
         for k, values in THEMES[theme].items() for v in values
     )
 
-    query = f"""
-        [out:json];
-        (
-            {theme_filters}
-        );
-        out center;
-    """
+    query = f"[out:json];({theme_filters});out center;"
     try:
-        response = api.get(query)
+        print(f"\n{repr(query)}")
+        response = requests.post(overpass_url, data=query).json()
         return [(float(e['lon']), float(e['lat'])) for e in response['elements']]
-    except:
+    except Exception as e:
         return []
 
 
@@ -120,7 +114,7 @@ def generate_route(start, end, pois, daily_capacity):
     coords.append(end)
 
     coord_str = ";".join(f"{lon},{lat}" for lon, lat in coords)
-    url = f"http://router.project-osrm.org/route/v1/driving/{coord_str}?overview=full"
+    url = f"{osrm_url}{coord_str}?overview=full"
     try:
         response = requests.get(url).json()
         return response["routes"][0]["geometry"] if response["code"] == "Ok" else None
@@ -181,13 +175,18 @@ if __name__ == "__main__":
     config = RouteConfig()
 
     # Generate initial random route
-    route_geo = generate_random_route("Berlin", "Munich", config)
+    route_geo = generate_random_route("Boston", "Cambridge", config)
 
+    print(route_geo)
+    try:
+        display_util.write_to_map_using(encoded_polyline=route_geo)
+    except Exception as e:
+        print(f"could nor write file: {e}")
     # Simulated annealing loop sketch
-    for iteration in range(100):
-        new_config = neighbor_function(config)
-        new_route = generate_random_route("Berlin", "Munich", new_config)
-        print('generated route')
+    # for iteration in range(100):
+    #     new_config = neighbor_function(config)
+    #     new_route = generate_random_route("Berlin", "Munich", new_config)
+    #     print('generated route')
         # Here you would compare routes using objective function
         # and decide whether to keep new configuration
         # current_score = calculate_score(route_geo, config)
@@ -195,3 +194,7 @@ if __name__ == "__main__":
         # if acceptance_criteria(current_score, new_score, temperature):
         #     config = new_config
         #     route_geo = new_route
+
+
+
+#TODO: generate random score to complete the loop of simulated annealing
