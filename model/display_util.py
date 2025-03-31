@@ -14,4 +14,4 @@ def write_to_map_using(encoded_polyline):
     folium.PolyLine(coordinates, color="blue", weight=5).add_to(m)
 
     # Save the map to an HTML file
-    m.save("osrm_route_map.html")
+    m.save("osrm_route_map2.html")

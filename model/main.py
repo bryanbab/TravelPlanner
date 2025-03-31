@@ -1,4 +1,5 @@
 # ==== IMPORTS ====
+import math
 from geopy.geocoders import Nominatim
 from shapely.geometry import Point, Polygon, LineString
 import overpass
@@ -6,7 +7,6 @@ import requests
 import numpy as np
 import random
 import copy
-
 import display_util
 
 
@@ -18,20 +18,24 @@ class RouteConfig:
         self.max_pois = 8  # Maximum POIs per route
         self.daily_capacity = 3  # Stops per day simulation
         self.segment_km = 16  # Route splitting granularity
-        self.theme = "education"  # Default theme
+        self.theme = "tourism"  # Default theme
 
 
 # ==== GEOCODING UTILITIES ====
 geolocator = Nominatim(user_agent="travel_annealing")
 overpass_url = "http://localhost:12347/api/interpreter"
 osrm_url = "http://localhost:5050/route/v1/driving/"
+foursquare_url = "https://api.foursquare.com/v3/places/"
+foursquare_api_key = "fsq3njJtNwJ9wE2dqmle63teUelN7qkwSzqrSKDGhg0mQg8="
 
 
+# returns a city's geographical coordinates (lon, lat)
 def geocode_city(city_name):
     location = geolocator.geocode(city_name)
     return (location.longitude, location.latitude) if location else None
 
 
+# returns a polygon that represents the geographical boundary of a city
 def get_city_bounds(city_name):
     location = geolocator.geocode(city_name, exactly_one=True, geometry='geojson')
     if location and 'geojson' in location.raw:
@@ -39,6 +43,7 @@ def get_city_bounds(city_name):
     return None
 
 
+# generates a random point within a given polygon's boundary
 def generate_random_point_within(polygon):
     min_x, min_y, max_x, max_y = polygon.bounds
     while True:
@@ -51,7 +56,7 @@ def generate_random_point_within(polygon):
 THEMES = {
     "education": {"amenity": ["school", "college", "university"]},
     "healthcare": {"amenity": ["hospital", "clinic"]},
-    "tourism": {"tourism": ["attraction", "museum"]},
+    "tourism": {"tourism": ["attraction", "museum", "arts_centre", "aquarium", "zoo"]},
     "religious": {"building": ["church", "mosque", "synagogue"]}
 }
 
@@ -98,7 +103,18 @@ def query_pois_for_segment(segment, theme, buffer_km):
 
 def sample_pois(pois, min_pois, max_pois):
     """Random selection with constraints"""
-    k = random.randint(min_pois, min(max_pois, len(pois)))
+    num_pois = len(pois)
+
+    # fix min and max to be within a valid range
+    actual_min = min_pois if num_pois >= min_pois else num_pois
+    actual_max = min(max_pois, num_pois)
+
+    if actual_min > actual_max:
+        # if there's no valid range, just return all available POIs 
+        sampled_pois = pois
+    else:
+        k = random.randint(actual_min, actual_max)
+        sampled_pois = random.sample(pois, k)
     return random.sample(pois, k) if pois else []
 
 
@@ -145,8 +161,10 @@ def generate_random_route(start_city, end_city=None, config=RouteConfig()):
     unique_pois = list(set(all_pois))
     sampled_pois = sample_pois(unique_pois, config.min_pois, config.max_pois)
 
+    final_route = generate_route(start, end, sampled_pois, config.daily_capacity)
+
     # Generate final route
-    return generate_route(start, end, sampled_pois, config.daily_capacity)
+    return final_route, sampled_pois
 
 
 # ==== SIMULATED ANNEALING UTILITIES ====
@@ -169,32 +187,179 @@ def neighbor_function(current_config):
     return new_config
 
 
+# returns id for POI (for use with Foursquare Place Details)
+def get_poi_id(lat, lon):
+    url = f"{foursquare_url}search?&ll={lat},{lon}&limit=1"
+    headers = {
+        "accept": "application/json",
+        "Authorization": foursquare_api_key
+    }
+    response = requests.get(url, headers=headers).json()
+    results = response.get("results", [])
+
+    if results:
+        return results[0].get("fsq_id")
+    return None
+
+# returns the rating for a place, give the places fsq_id (defaults to 5.0 if None)
+def get_poi_rating(place_id):
+    url = f"{foursquare_url}{place_id}?fields=rating"
+
+    headers = {
+        "accept": "application/json",
+        "Authorization": foursquare_api_key
+    }
+    response = requests.get(url, headers=headers).json()
+
+    return response.get("rating", 5.0)
+
+# gets the ratings for all POIs in a list
+def get_all_ratings(pois):
+    ratings = []
+
+    for lon, lat in pois:
+        place_id = get_poi_id(lat, lon)
+        if place_id:
+            rating = get_poi_rating(place_id)
+        else:
+            # default if there is no place_id
+            rating = 5.0
+
+        ratings.append(rating)
+
+    return np.array(ratings)
+
+
+# returns a score based on how well POIs on route match the theme
+def calculate_theme_match(pois, theme):
+    theme_keywords = THEMES[theme]
+    matching_pois = 0
+    for poi in pois:
+        for k, values in theme_keywords.items():
+            if any(value in poi[0] for value in values):
+                matching_pois += 1
+    return matching_pois / len(pois)
+
+# haversine formula to calculate the distance between two points on the Earth's surface
+def haversine_distance(lon1, lat1, lon2, lat2):
+    # radius of the Earth (km)
+    earth_radius = 6371
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+
+    a = math.sin(delta_phi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+    distance = earth_radius * c
+    distance_meters = distance * 1000
+
+    return distance_meters
+
+
+# returns how spaced out POIs are on the route
+def calculate_geographic_spread(pois):
+    # defaults to 0 if there is only 1 POI in the route
+    if len(pois) < 2:
+        return 0
+
+    total_distance = 0
+    num_pairs = 0
+
+    # calculate the distance between each pair of points
+    for i in range(len(pois)):
+        for j in range(i + 1, len(pois)):
+            lon1, lat1 = pois[i]
+            lon2, lat2 = pois[j]
+            total_distance += haversine_distance(lon1, lat1, lon2, lat2)
+            num_pairs += 1
+
+    # average distance between all pairs
+    average_distance = total_distance / num_pairs
+    return average_distance
+
+
+# returns the length of the route in meters (shorter is better)
+def calculate_route_length(pois):
+    line = LineString(pois)
+    return line.length
+
+
+# calculates a score for a route based on:
+# theme match, ratings, geographic distribution, and route length
+def calculate_score(route, config, pois):
+
+    # calculate all intermediate scores
+    theme_score = calculate_theme_match(route[1], config.theme)
+    print(pois)
+    ratings = get_all_ratings(pois)
+    print(ratings)
+    rating_score = np.mean(ratings)
+    geographic_score = calculate_geographic_spread(pois)
+    route_length_score = calculate_route_length(pois)
+
+    # combine all scores (ADJUST WEIGHTS dynamically?)
+    total_score = ((theme_score * 0.4)
+                   + (rating_score * 0.3)
+                   + (geographic_score * 0.2)
+                   + (route_length_score * 0.1))
+    return total_score
+
+
+# determines whether to accept a new solution in an optimization process
+def acceptance_criteria(current_score, new_score, temperature):
+    if new_score > current_score:
+        return True
+    else:
+        delta = new_score - current_score
+        prob = math.exp(delta / temperature)
+        return random.random() < prob
+
+
+# ==== SIMULATED ANNEALING LOOP ====
+# runs simulated annealing for generated routes,
+# returns the best-found route and configuration
+def simulated_annealing(pois, start_city, end_city=None, route_geo=None, config=RouteConfig(), temperature=0.5,
+                        cooling_rate=0.99):
+    # just in case route hasn't been generated
+    if route_geo is None:
+        route_geo = generate_random_route(start_city, end_city, config)
+
+    current_score = calculate_score(route_geo, config, pois)
+
+    for iteration in range(100):
+        # generate a new solution
+        new_config = neighbor_function(config)
+        new_route, new_pois = generate_random_route(start_city, end_city, new_config)
+        new_score = calculate_score(new_route, new_config, new_pois)
+
+        # accept the new route based on acceptance criteria
+        if acceptance_criteria(current_score, new_score, temperature):
+            config = new_config
+            route_geo = new_route
+            pois = new_pois
+            # update the score as well
+            current_score = new_score
+
+        # decrease temperature
+        temperature *= cooling_rate
+
+    print("final score: ", calculate_score(route_geo, config, pois))
+    return route_geo, config, pois
+
+
 # ==== EXAMPLE USAGE ====
 if __name__ == "__main__":
     # Initial configuration
     config = RouteConfig()
 
-    # Generate initial random route
-    route_geo = generate_random_route("Boston", "Cambridge", config)
+    # start and end cities
+    start_city = "Boston MA"
+    end_city = "Amherst MA"
 
-    print(route_geo)
-    try:
-        display_util.write_to_map_using(encoded_polyline=route_geo)
-    except Exception as e:
-        print(f"could nor write file: {e}")
-    # Simulated annealing loop sketch
-    # for iteration in range(100):
-    #     new_config = neighbor_function(config)
-    #     new_route = generate_random_route("Berlin", "Munich", new_config)
-    #     print('generated route')
-        # Here you would compare routes using objective function
-        # and decide whether to keep new configuration
-        # current_score = calculate_score(route_geo, config)
-        # new_score = calculate_score(new_route, new_config)
-        # if acceptance_criteria(current_score, new_score, temperature):
-        #     config = new_config
-        #     route_geo = new_route
+    # generate initial random route
+    route_geo, pois = generate_random_route(start_city, end_city, config)
 
-
-
-#TODO: generate random score to complete the loop of simulated annealing
+    # run simulated annealing to get best route
+    simulated_annealing(pois, start_city, end_city, route_geo, config)
