@@ -1,33 +1,30 @@
 # ==== IMPORTS ====
 import math
 from geopy.geocoders import Nominatim
-from shapely.geometry import Point, Polygon, LineString
+from shapely.geometry import Point, Polygon, LineString, MultiPolygon
+from theme_meta import THEMES
+from config_generator import *
 import overpass
 import requests
 import numpy as np
 import random
 import copy
 import display_util
-
-
-# ==== CONFIGURATION CLASS ====
-class RouteConfig:
-    def __init__(self):
-        self.buffer_km = 15  # Search corridor width
-        self.min_pois = 2  # Minimum POIs per route
-        self.max_pois = 8  # Maximum POIs per route
-        self.daily_capacity = 3  # Stops per day simulation
-        self.segment_km = 16  # Route splitting granularity
-        self.theme = "tourism"  # Default theme
+import time
 
 
 # ==== GEOCODING UTILITIES ====
-geolocator = Nominatim(user_agent="travel_annealing")
+poi_manager = POIQueryManager()
+geolocator = Nominatim(
+    user_agent="travel_annealing",
+    domain="localhost:8080",
+    scheme="http"
+)
 overpass_url = "http://localhost:12347/api/interpreter"
 osrm_url = "http://localhost:5050/route/v1/driving/"
+
 foursquare_url = "https://api.foursquare.com/v3/places/"
 foursquare_api_key = "fsq3njJtNwJ9wE2dqmle63teUelN7qkwSzqrSKDGhg0mQg8="
-
 
 # returns a city's geographical coordinates (lon, lat)
 def geocode_city(city_name):
@@ -51,16 +48,6 @@ def generate_random_point_within(polygon):
         if polygon.contains(point):
             return (point.x, point.y)
 
-
-# ==== THEME DEFINITIONS ====
-THEMES = {
-    "education": {"amenity": ["school", "college", "university"]},
-    "healthcare": {"amenity": ["hospital", "clinic"]},
-    "tourism": {"tourism": ["attraction", "museum", "arts_centre", "aquarium", "zoo"]},
-    "religious": {"building": ["church", "mosque", "synagogue"]}
-}
-
-
 # ==== ROUTE GEOMETRY HANDLING ====
 def get_route_geometry(start_coord, end_coord):
     """Get actual road route geometry using OSRM"""
@@ -80,27 +67,6 @@ def split_route_into_segments(route, segment_length_km=16):
     return [LineString([route.interpolate(i), route.interpolate(i + segment_length)])
             for i in np.arange(0, route.length, segment_length)]
 
-def query_pois_for_segment(segment, theme, buffer_km):
-    """Query POIs in buffered corridor around route segment"""
-    buffer_deg = buffer_km * 1000 / 111320  # Approximate degree conversion
-    buffered = segment.buffer(buffer_deg)
-    bbox = (buffered.bounds[1], buffered.bounds[0],  # OSM format: (south, west, north, east)
-            buffered.bounds[3], buffered.bounds[2])
-
-    theme_filters = "".join(
-        f'node["{k}"~"{v}"]({bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]});'
-        for k, values in THEMES[theme].items() for v in values
-    )
-
-    query = f"[out:json];({theme_filters});out center;"
-    try:
-        print(f"\n{repr(query)}")
-        response = requests.post(overpass_url, data=query).json()
-        return [(float(e['lon']), float(e['lat'])) for e in response['elements']]
-    except Exception as e:
-        return []
-
-
 def sample_pois(pois, min_pois, max_pois):
     """Random selection with constraints"""
     num_pois = len(pois)
@@ -115,7 +81,7 @@ def sample_pois(pois, min_pois, max_pois):
     else:
         k = random.randint(actual_min, actual_max)
         sampled_pois = random.sample(pois, k)
-    return random.sample(pois, k) if pois else []
+    return sampled_pois
 
 
 # ==== ROUTE GENERATION ====
@@ -133,55 +99,220 @@ def generate_route(start, end, pois, daily_capacity):
     url = f"{osrm_url}{coord_str}?overview=full"
     try:
         response = requests.get(url).json()
-        return response["routes"][0]["geometry"] if response["code"] == "Ok" else None
+        return response["routes"][0] if response["code"] == "Ok" else None
     except:
         return None
 
 
 # ==== MAIN WORKFLOW ====
-def generate_random_route(start_city, end_city=None, config=RouteConfig()):
-    """Core route generation with current config"""
-    # Geocode endpoints
-    start = geocode_city(start_city)
-    if not start: raise ValueError(f"Couldn't geocode {start_city}")
-
-    end = (geocode_city(end_city) if end_city
-           else generate_random_point_within(get_city_bounds(start_city)))
-
+def generate_random_route_and_poll_pois(start, end, config=RouteConfig()):
+    #Do not geo code in this method, causes api timeout (start and end needs to be coordinates)
     # Get base route
     route_line = get_route_geometry(start, end)
     if not route_line: return None
 
+    all_pois = poll_pois_from_route_using_segments(route_line, config)
+    poi_subset = sample_pois(all_pois, config.min_pois, config.max_pois)
+    final_route = generate_route(start, end, poi_subset, config.daily_capacity)
+    return final_route, poi_subset
+
+
+def poll_pois_from_route_using_segments(route_line, config):
     # Query POIs along entire route
     all_pois = []
-    for segment in split_route_into_segments(route_line, config.segment_km):
-        all_pois += query_pois_for_segment(segment, config.theme, config.buffer_km)
+    current_buffer_union = None
+    segments = split_route_into_segments(route_line, config.segment_km)
 
-    # Remove duplicates and sample
-    unique_pois = list(set(all_pois))
-    sampled_pois = sample_pois(unique_pois, config.min_pois, config.max_pois)
+    for segment in segments:
+        # Create buffer for current segment
+        buffer_deg = config.buffer_km * 1000 / 111320  # Approximate degree conversion
+        segment_buffer = segment.buffer(buffer_deg)
 
-    final_route = generate_route(start, end, sampled_pois, config.daily_capacity)
+        # First segment or no previous querying
+        if current_buffer_union is None:
+            current_buffer_union = segment_buffer
+        else:
+            # Union with existing buffer
+            current_buffer_union = current_buffer_union.union(segment_buffer)
 
-    # Generate final route
-    return final_route, sampled_pois
+    # First run case
+    if poi_manager.previously_queried_area is None:
+        print("Initial query for full buffer area...")
+        all_pois = query_pois_for_area(current_buffer_union, config.theme)
+        poi_manager.previously_queried_area = current_buffer_union
+
+        # Generate final route
+        return all_pois
+
+    try:
+        display_util.write_buffers_to_map(poi_manager.previously_queried_area, current_buffer_union)
+    except Exception as e:
+        print(e)
+    # Handle buffer changes - both growing and shrinking
+
+    # 1. Handle new areas (buffer growth)
+    if not current_buffer_union.within(poi_manager.previously_queried_area):
+        new_area = current_buffer_union.difference(poi_manager.previously_queried_area)
+
+        if not new_area.is_empty and new_area.area > 0.0000001:  # Small threshold to avoid tiny fragments
+            print(f"Querying new buffer areas...")
+            new_pois = query_pois_for_area(new_area, config.theme)
+            all_pois.extend(new_pois)
+
+        # 2. Handle areas where buffer has decreased
+    if not poi_manager.previously_queried_area.within(current_buffer_union):
+        print("Buffer has decreased in some areas, filtering POIs...")
+
+        # Option 1: Filter from cached POIs (more efficient)
+        cached_pois = poi_manager.get_cached_pois()
+        if cached_pois:
+            from shapely.geometry import Point
+
+            # Filter to keep only POIs that are still within current buffer
+            valid_pois = []
+            for poi in cached_pois:
+                point = Point(poi)
+                if current_buffer_union.contains(point):
+                    valid_pois.append(poi)
+                    if poi not in all_pois:
+                        all_pois.append(poi)
+
+            # Alternative approach: Replace cached_pois with only valid ones
+            # cached_pois = valid_pois
+
+        # Option 2: Re-query the entire current buffer (less efficient, but guarantees accuracy)
+        else:
+            print("No cached POIs available, re-querying entire buffer...")
+            all_pois = query_pois_for_area(current_buffer_union, config.theme)
+    else:
+        # If no part of the buffer decreased, get POIs from cache that are in current buffer
+        cached_pois = poi_manager.get_cached_pois()
+        if cached_pois:
+            from shapely.geometry import Point
+
+            for poi in cached_pois:
+                point = Point(poi)
+                if current_buffer_union.contains(point) and poi not in all_pois:
+                    all_pois.append(poi)
+
+        # Update the previously queried area to be the current buffer
+    poi_manager.previously_queried_area = current_buffer_union
+
+    print(f"Returning {len(all_pois)} POIs for current buffer")
+    return all_pois
+
+
+def query_pois_for_area(area, theme):
+    """Query POIs in the given area (which may be MultiPolygon or Polygon)"""
+    pois = []
+
+    # Handle both Polygon and MultiPolygon cases
+    if isinstance(area, MultiPolygon):
+        # Process each polygon separately to avoid overly complex queries
+        for poly in area.geoms:
+            new_pois = query_pois_for_polygon(poly, theme)
+            pois.extend(new_pois)
+    else:
+        # Process single polygon
+        pois.extend(query_pois_for_polygon(area, theme))
+
+    poi_manager.add_to_cache(pois)
+
+    return pois
+
+
+def query_pois_for_polygon(polygon, theme):
+    """Query POIs for a single polygon area"""
+
+    # Get bounding box
+    bbox = (polygon.bounds[1], polygon.bounds[0],  # OSM format: (south, west, north, east)
+            polygon.bounds[3], polygon.bounds[2])
+
+    # Format bbox for query
+    bbox_str = f"{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}"
+
+    # Create polygon filter
+    poly_coords = " ".join([f"{lat} {lon}" for lon, lat in list(polygon.exterior.coords)])
+    poly_filter = f"(poly:'{poly_coords}')"
+
+    # Build individual node queries with both bbox and polygon filter applied to each
+    node_queries = []
+    for k, values in THEMES[theme].items():
+        for v in values:
+            # Apply both bbox and polygon filter to each node query
+            node_queries.append(f'node["{k}"~"{v}"]({bbox_str}){poly_filter};')
+
+    # Join all node queries together
+    all_queries = "".join(node_queries)
+
+    # Construct final query
+    query = f"[out:json];({all_queries});out center;"
+
+    try:
+        print(f"Querying new area...")
+        start_time = time.time()
+        response = requests.post(overpass_url, data=query).json()
+        elapsed = time.time() - start_time
+        print(f"Query completed in {elapsed:.2f} seconds, found {len(response['elements'])} POIs")
+
+        return [(float(e['lon']), float(e['lat'])) for e in response['elements']]
+    except Exception as e:
+        print(f"Error querying Overpass API: {e}")
+        return []
 
 
 # ==== SIMULATED ANNEALING UTILITIES ====
-def neighbor_function(current_config):
-    """Generate slightly modified configuration"""
+def neighbor_function(current_config, time_percentage):
+    """
+    Generate a slightly modified configuration based on the current state
+
+    This function creates a "neighbor" solution by making small, intelligent
+    modifications to the current configuration. The modifications are adaptive
+    based on the current time_percentage.
+
+    Parameters:
+    - current_config: The current route configuration
+    - time_percentage: How far off we are from the target time budget (negative = under budget)
+
+    Returns:
+    - A new RouteConfig object with modified parameters
+    """
     new_config = copy.deepcopy(current_config)
 
-    # Adjust buffer radius
-    new_config.buffer_km += random.choice([-2, 0, 2])
-    new_config.buffer_km = max(5, min(new_config.buffer_km, 30))
+    # Temperature-dependent exploration factor
+    # Early in annealing: bigger changes, Later: smaller changes
+    exploration_factor = random.uniform(0.5, 1.5)
 
-    # Adjust daily capacity
-    new_config.daily_capacity += random.randint(-1, 1)
-    new_config.daily_capacity = max(1, min(new_config.daily_capacity, 5))
+    # Adjust buffer based on time percentage
+    # If we're under budget (negative percentage), we can increase buffer to find more POIs
+    # If we're over budget, we should decrease buffer to reduce POIs
+    buffer_adjustment = 0.0
 
-    # Occasionally change theme
-    if random.random() < 0.2:
+    if time_percentage < -10:  # Significantly under time budget
+        # Increase buffer to find more POIs - more conservative increase
+        buffer_adjustment = random.uniform(0.1, 0.5) * exploration_factor
+    elif time_percentage > 10:  # Significantly over time budget
+        # Decrease buffer to reduce number of POIs - more conservative decrease
+        buffer_adjustment = random.uniform(-0.5, -0.1) * exploration_factor
+    else:
+        # Near target budget, make smaller adjustments
+        buffer_adjustment = random.uniform(-0.2, 0.2) * exploration_factor
+
+    # Apply buffer adjustment with bounds checking
+    new_buffer = new_config.buffer_km + buffer_adjustment
+    new_config.buffer_km = max(0.5, min(new_buffer, 20.0))  # Keep between 0.5 and 20 km
+
+    # Occasionally adjust other parameters
+    if random.random() < 0.15:  # 15% chance to adjust segment size
+        segment_adjustment = random.choice([-2, -1, 1, 2])
+        new_config.segment_km = max(5, min(new_config.segment_km + segment_adjustment, 25))
+
+    if random.random() < 0.05:  # 5% chance to adjust daily capacity
+        capacity_adjustment = random.choice([-1, 1])
+        new_config.daily_capacity = max(1, min(new_config.daily_capacity + capacity_adjustment, 8))
+
+    # Occasionally change theme (less frequently)
+    if random.random() < 0.05:  # 5% chance
         new_config.theme = random.choice(list(THEMES.keys()))
 
     return new_config
@@ -209,8 +340,11 @@ def get_poi_rating(place_id):
         "accept": "application/json",
         "Authorization": foursquare_api_key
     }
-    response = requests.get(url, headers=headers).json()
-
+    response = {}
+    try:
+        response = requests.get(url, headers=headers).json()
+    except Exception as e:
+        response["rating"] = random.randint(0,5)
     return response.get("rating", 5.0)
 
 # gets the ratings for all POIs in a list
@@ -220,7 +354,9 @@ def get_all_ratings(pois):
     for lon, lat in pois:
         place_id = get_poi_id(lat, lon)
         if place_id:
-            rating = get_poi_rating(place_id)
+            #TODO: REMOVE IN FINAL LOOP
+            # rating = get_poi_rating(place_id)
+            rating = random.randint(1,5)
         else:
             # default if there is no place_id
             rating = 5.0
@@ -228,17 +364,6 @@ def get_all_ratings(pois):
         ratings.append(rating)
 
     return np.array(ratings)
-
-
-# returns a score based on how well POIs on route match the theme
-def calculate_theme_match(pois, theme):
-    theme_keywords = THEMES[theme]
-    matching_pois = 0
-    for poi in pois:
-        for k, values in theme_keywords.items():
-            if any(value in poi[0] for value in values):
-                matching_pois += 1
-    return matching_pois / len(pois)
 
 # haversine formula to calculate the distance between two points on the Earth's surface
 def haversine_distance(lon1, lat1, lon2, lat2):
@@ -280,6 +405,51 @@ def calculate_geographic_spread(pois):
     return average_distance
 
 
+def calculate_time_score(route, pois, config):
+    """
+    Calculate how well the route adheres to the target time budget.
+
+    Parameters:
+    - route: The route data containing time information
+    - pois: List of POIs on the route
+    - config: Route configuration with time_budget
+
+    Returns:
+    - time_diff: Difference from budget in seconds (+ over budget, - under budget)
+    - time_percentage: Percentage difference from budget
+    """
+    # Time budget in seconds
+    time_budget = config.time_budget * 60 * 60  # Convert hours to seconds
+
+    # Calculate travel time
+    travel_time = route.get('duration', 0)  # Route travel time in seconds
+    if not travel_time and 'time' in route:
+        travel_time = route['time']  # Alternative key
+
+    # Add time spent at POIs
+    poi_time = time_spent_in_pois(pois)
+
+    # Total time
+    total_time = travel_time + poi_time
+
+    # Calculate difference
+    time_diff = total_time - time_budget
+
+    # Calculate percentage (+ means over budget, - means under budget)
+    if time_budget > 0:
+        time_percentage = (time_diff / time_budget) * 100
+    else:
+        time_percentage = 0
+
+    return time_diff, time_percentage
+
+
+def time_spent_in_pois(pois):
+    poi_time = 0
+    for poi in pois:
+        poi_time += random.randint(1,3) * 60
+    return poi_time
+
 # returns the length of the route in meters (shorter is better)
 def calculate_route_length(pois):
     line = LineString(pois)
@@ -287,29 +457,77 @@ def calculate_route_length(pois):
 
 
 # calculates a score for a route based on:
-# theme match, ratings, geographic distribution, and route length
+# ratings, geographic distribution, and time_budget
 def calculate_score(route, config, pois):
+    """
+    Calculate a comprehensive score for a route based on multiple factors.
 
-    # calculate all intermediate scores
-    theme_score = calculate_theme_match(route[1], config.theme)
-    print(pois)
-    ratings = get_all_ratings(pois)
-    print(ratings)
-    rating_score = np.mean(ratings)
-    geographic_score = calculate_geographic_spread(pois)
-    route_length_score = calculate_route_length(pois)
+    A lower score is better. The function balances:
+    - POI ratings (higher ratings = better score)
+    - Geographic distribution (more evenly spaced = better score)
+    - Time budget adherence (closer to target time = better score)
+    - POI count (appropriate number of POIs based on time budget)
 
-    # combine all scores (ADJUST WEIGHTS dynamically?)
-    total_score = ((theme_score * 0.4)
-                   + (rating_score * 0.3)
-                   + (geographic_score * 0.2)
-                   + (route_length_score * 0.1))
-    return total_score
+    Parameters:
+    - route: The route data (containing time, distance)
+    - config: Route configuration parameters
+    - pois: List of POIs on the route [(lon, lat), ...]
+
+    Returns:
+    - total_score: The overall score (lower is better)
+    - time_percentage: How far off we are from time budget (for neighbor function)
+    """
+    # Safety check
+    if not pois or len(pois) == 0:
+        return float('inf'), 0
+
+    # Calculate all component scores
+    try:
+        # Ratings component (higher ratings = lower score)
+        ratings = get_all_ratings(pois)
+        if len(ratings) == 0:
+            rating_score = 5.0  # Default if no ratings
+        else:
+            # Transform ratings so lower values are better (for minimization)
+            rating_score = 10.0 - min(10.0, np.mean(ratings) * 2)  # Scale 0-5 ratings to 0-10 score
+
+        # Geographic distribution component (higher spread = lower score, up to a point)
+        geographic_spread = calculate_geographic_spread(pois)
+        # Normalize geographic spread: we want points reasonably spread out but not too far
+        ideal_spread = 5000.0  # in meters
+        geographic_score = abs(geographic_spread - ideal_spread) / 1000.0
+
+        # Time budget adherence
+        time_diff, time_percentage = calculate_time_score(route, pois, config)
+        time_budget = config.time_budget * 60  # convert to seconds
+        time_score = abs(time_diff) / (time_budget / 4)  # Normalized score
+
+        # POI count component - reward routes with appropriate number of POIs
+        ideal_poi_count = (config.time_budget * 60) / (120 * 60)  # 1 POI per 2 hours is ideal
+        poi_count_score = abs(len(pois) - ideal_poi_count) * 2.0
+
+        # Weight the components and combine for final score (lower is better)
+        weighted_score = (
+                rating_score * 0.35 +  # 35% weight for quality
+                geographic_score * 0.25 +  # 25% weight for distribution
+                time_score * 0.30 +  # 30% weight for time adherence
+                poi_count_score * 0.10  # 10% weight for appropriate POI count
+        )
+
+        print(f"Score components - Rating: {rating_score:.2f}, Geographic: {geographic_score:.2f}, "
+              f"Time: {time_score:.2f}, POI count: {poi_count_score:.2f}")
+        print(f"Final weighted score: {weighted_score:.4f}, Time %: {time_percentage}")
+
+        return weighted_score, time_percentage
+
+    except Exception as e:
+        print(f"Error calculating score: {e}")
+        return float('inf'), 0
 
 
 # determines whether to accept a new solution in an optimization process
 def acceptance_criteria(current_score, new_score, temperature):
-    if new_score > current_score:
+    if new_score < current_score:
         return True
     else:
         delta = new_score - current_score
@@ -317,49 +535,167 @@ def acceptance_criteria(current_score, new_score, temperature):
         return random.random() < prob
 
 
-# ==== SIMULATED ANNEALING LOOP ====
-# runs simulated annealing for generated routes,
-# returns the best-found route and configuration
-def simulated_annealing(pois, start_city, end_city=None, route_geo=None, config=RouteConfig(), temperature=0.5,
-                        cooling_rate=0.99):
-    # just in case route hasn't been generated
-    if route_geo is None:
-        route_geo = generate_random_route(start_city, end_city, config)
+# ==== IMPROVED SIMULATED ANNEALING LOOP ====
+def simulated_annealing(pois, start_coord, end_coord, route, config=RouteConfig(),
+                        initial_temperature=100.0, cooling_rate=0.95, min_temperature=0.1,
+                        max_iterations=100, convergence_threshold=0.001, max_non_improving=15):
+    """
+    Run simulated annealing with proper temperature decay and convergence detection
 
-    current_score = calculate_score(route_geo, config, pois)
+    Parameters:
+    - initial_temperature: Starting temperature (higher = more exploration)
+    - cooling_rate: Rate at which temperature decreases (0.8-0.99)
+    - min_temperature: Stop when temperature reaches this value
+    - max_iterations: Maximum number of iterations regardless of other conditions
+    - convergence_threshold: If score doesn't improve by this amount, consider converged
+    - max_non_improving: Number of consecutive non-improving iterations before stopping
+    """
+    visualizer = []
+    temperature = initial_temperature
+    current_config = copy.deepcopy(config)
+    current_route = route
+    current_pois = pois
 
-    for iteration in range(100):
-        # generate a new solution
-        new_config = neighbor_function(config)
-        new_route, new_pois = generate_random_route(start_city, end_city, new_config)
-        new_score = calculate_score(new_route, new_config, new_pois)
+    # Calculate initial score
+    current_score, time_percentage = calculate_score(current_route, current_config, current_pois)
 
-        # accept the new route based on acceptance criteria
-        if acceptance_criteria(current_score, new_score, temperature):
-            config = new_config
-            route_geo = new_route
-            pois = new_pois
-            # update the score as well
+    # Track best solution found
+    best_route = current_route
+    best_config = copy.deepcopy(current_config)
+    best_pois = current_pois
+    best_score = current_score
+
+    # Counters and tracking
+    iteration = 0
+    non_improving_iterations = 0
+    score_history = [current_score]
+
+    print(f"Starting SA: Initial score = {current_score:.4f}, Temperature = {temperature:.2f}")
+
+    # Main annealing loop
+    while (temperature > min_temperature and
+           iteration < max_iterations and
+           non_improving_iterations < max_non_improving):
+
+        # Generate a neighbor solution
+        new_config = neighbor_function(current_config, time_percentage)
+        new_route, new_pois = generate_random_route_and_poll_pois(start_coord, end_coord,
+                                                                  new_config)
+
+        # Check if route generation was successful
+        if not new_route or not new_pois:
+            print("Failed to generate new route, skipping iteration")
+            iteration += 1
+            continue
+
+        # Calculate new score
+        new_score, new_time_percentage = calculate_score(new_route, new_config, new_pois)
+
+        # Decide whether to accept the new solution
+        # For maximization problems (higher score is better)
+        delta = new_score - current_score
+
+        if delta > 0 or random.random() < math.exp(delta / temperature):
+            # Accept the new solution
+            current_config = new_config
+            current_route = new_route
+            current_pois = new_pois
             current_score = new_score
+            time_percentage = new_time_percentage
 
-        # decrease temperature
+            # Record for visualization
+            visualizer.append(current_route)
+
+            try:
+                display_util.write_to_map_using(current_route['geometry'])
+            except Exception as e:
+                print(f"Visualization error: {e}")
+
+            # Update best solution if needed
+            # For maximization problems (higher score is better)
+            route_line = LineString(current_pois)
+            #
+            # # Create sample buffers
+            # current_buffer = route_line.buffer(0.01)  # Current buffer around route
+            # previous_buffer = route_line.buffer(0.005)  # Previous buffer around route
+            if current_score > best_score:
+                best_route = current_route
+                best_config = copy.deepcopy(current_config)
+                best_pois = current_pois
+                best_score = current_score
+                non_improving_iterations = 0
+                print(f"Iteration {iteration}: New best score = {best_score:.4f}")
+
+                try:
+                    display_util.write_to_map_with_waypoints(best_route['geometry'], best_pois, good=True)
+                except Exception as e:
+                    print(f"Final visualization error: {e}")
+            else:
+                non_improving_iterations += 1
+
+            try:
+                display_util.write_to_map_with_waypoints(current_route['geometry'], current_pois, bad=True)
+            except Exception as e:
+                print(f"Final visualization error: {e}")
+        else:
+            # Reject the solution
+            non_improving_iterations += 1
+
+        # Check for convergence
+        score_history.append(current_score)
+        if len(score_history) > 5:  # Use window of 5 iterations
+            avg_recent = sum(score_history[-5:]) / 5
+            if abs(avg_recent - score_history[-6]) < convergence_threshold:
+                print(f"Converged after {iteration} iterations (score stabilized)")
+                break
+
+        # Cool down the temperature
         temperature *= cooling_rate
+        iteration += 1
 
-    print("final score: ", calculate_score(route_geo, config, pois))
-    return route_geo, config, pois
+        # Log progress periodically
+        if iteration % 10 == 0:
+            print(
+                f"Iteration {iteration}: Score = {current_score:.4f}, Best = {best_score:.4f}, Temp = {temperature:.2f}")
 
+    # Report termination condition
+    if temperature <= min_temperature:
+        print(f"Stopped: Minimum temperature reached ({temperature:.6f})")
+    elif iteration >= max_iterations:
+        print(f"Stopped: Maximum iterations reached ({iteration})")
+    elif non_improving_iterations >= max_non_improving:
+        print(f"Stopped: No improvement for {max_non_improving} iterations")
+
+    # Visualize optimization path
+    try:
+        display_util.write_multiple_routes_to_map(visualizer)
+    except Exception as e:
+        print(f"Final visualization error: {e}")
+
+    print(f"Final best score: {best_score:.4f}")
+    print(f"Iterations run: {iteration}")
+
+    # Return the best solution found
+    return best_route, best_config, best_pois
 
 # ==== EXAMPLE USAGE ====
 if __name__ == "__main__":
+
     # Initial configuration
-    config = RouteConfig()
+    config = generate_route_config_from_user_preferences(UserPreferences())
 
     # start and end cities
     start_city = "Boston MA"
-    end_city = "Amherst MA"
+    end_city = None
+
+    start_coord = geocode_city(start_city)
+    if not start_coord: raise ValueError(f"Couldn't geocode {start_city}")
+
+    end_coord = (geocode_city(end_city) if end_city
+           else generate_random_point_within(get_city_bounds(start_city)))
 
     # generate initial random route
-    route_geo, pois = generate_random_route(start_city, end_city, config)
+    route, pois = generate_random_route_and_poll_pois(start_coord, end_coord, config)
 
     # run simulated annealing to get best route
-    simulated_annealing(pois, start_city, end_city, route_geo, config)
+    simulated_annealing(pois, start_coord, end_coord, route, config)
