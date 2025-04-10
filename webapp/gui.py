@@ -156,14 +156,13 @@ roam_level = st.sidebar.slider(
 
 run_button = st.button("Generate Route")
 
-# === SIMULATED ANNEALING RUN ===
+# SIMULATED ANNEALING RUN
 if 'route_data' not in st.session_state:
     st.session_state.route_data = None
 
 if run_button:
     with st.spinner("Generating route..."):
         try:
-            # This would be part of your config generation process
             trip_preferences = UserPreferences(weights=convert_preferences_to_weights(user_preferences),
                                                theme_preference=selected_theme,
                                                trip_duration_days=trip_duration_days,
@@ -184,7 +183,7 @@ if run_button:
                 end_coord = (geocode_city(end_city) if end_city
                              else generate_random_point_within(get_city_bounds(start_city)))
 
-                # Check if geocoding was successful
+                # check if geocoding was successful
                 if not start_coord:
                     st.error(f"Could not find coordinates for start city: {start_city}")
                 if end_city and not end_coord:
@@ -193,19 +192,16 @@ if run_button:
                 # generate initial random route
                 if start_coord and end_coord:
                     route, pois = generate_random_route_and_poll_pois(start_coord, end_coord, config)
-                    # # Debugging: Check structure of pois and route
-                    # st.write("Route:", route)
-                    # print("POIs:", pois)
 
                     if not route or not pois:
-                        st.error("Failed to generate a valid route or points of interest.")
+                        st.error("Failed to generate a valid route or POIs.")
                     else:
                         best_route, _, best_pois = simulated_annealing(pois, start_coord, end_coord, route, config)
 
                         st.session_state.route_data = (best_route, best_pois)  # Store route data in session state
                         st.success("Route generated!")
 
-                        # Visualize route using pydeck
+                        # show route using folium
                         poi_coors = [{"lon": lon, "lat": lat} for lon, lat in pois]
                         if best_route:
                             map_folium = write_to_map_using(encoded_polyline=best_route["geometry"])
