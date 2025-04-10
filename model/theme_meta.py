@@ -1,48 +1,48 @@
 THEMES = {
-    "education": {
+    "Education": {
         "amenity": ["school", "college", "university", "kindergarten", "library", "public_bookcase"]
     },
-    "healthcare": {
+    "Healthcare": {
         "amenity": ["hospital", "clinic", "doctors", "dentist", "pharmacy", "veterinary"]
     },
-    "tourism": {
+    "Tourism": {
         "tourism": ["attraction", "museum", "arts_centre", "aquarium", "zoo", "theme_park", "gallery"],
         "historic": ["castle", "monument", "ruins", "archaeological_site"]
     },
-    "religious": {
+    "Religious": {
         "amenity": ["place_of_worship"],
         "building": ["church", "mosque", "synagogue", "temple"]
     },
-    "transportation": {
+    "Transportation": {
         "amenity": ["bus_station", "ferry_terminal", "taxi", "bicycle_rental", "car_rental", "fuel"],
         "railway": ["station", "tram_stop", "halt"]
     },
-    "accommodation": {
+    "Accommodation": {
         "tourism": ["hotel", "motel", "guest_house", "hostel", "camp_site", "caravan_site"]
     },
-    "food_and_drink": {
+    "Food_and_Drink": {
         "amenity": ["restaurant", "cafe", "fast_food", "pub", "bar", "ice_cream"]
     },
-    "shopping": {
+    "Shopping": {
         "shop": ["supermarket", "convenience", "mall", "clothes", "gift", "bakery", "butcher", "greengrocer"]
     },
-    "leisure": {
+    "Leisure": {
         "leisure": ["park", "garden", "playground", "sports_centre", "stadium", "swimming_pool", "fitness_centre"]
     },
-    "emergency": {
+    "Emergency": {
         "amenity": ["police", "fire_station", "ambulance_station"],
         "emergency": ["phone"]
     },
-    "finance": {
+    "Finance": {
         "amenity": ["bank", "atm", "bureau_de_change"]
     },
-    "public_services": {
+    "Public_services": {
         "amenity": ["post_office", "townhall", "courthouse", "community_centre"]
     },
-    "entertainment": {
+    "Entertainment": {
         "amenity": ["theatre", "cinema", "nightclub", "casino"]
     },
-    "natural": {
+    "Natural": {
         "natural": ["beach", "peak", "volcano", "waterfall", "cave_entrance"]
     }
 }

@@ -2,14 +2,14 @@
 import math
 from geopy.geocoders import Nominatim
 from shapely.geometry import Point, Polygon, LineString, MultiPolygon
-from theme_meta import THEMES
-from config_generator import *
+from .theme_meta import THEMES
+from .config_generator import *
 import overpass
 import requests
 import numpy as np
 import random
 import copy
-import display_util
+from . import display_util
 import time
 
 
@@ -20,6 +20,7 @@ geolocator = Nominatim(
     domain="localhost:8080",
     scheme="http"
 )
+
 overpass_url = "http://localhost:12347/api/interpreter"
 osrm_url = "http://localhost:5050/route/v1/driving/"
 

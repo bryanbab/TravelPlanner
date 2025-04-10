@@ -25,7 +25,7 @@ class UserPreferences:
     def __init__(
         self,
         weights=None,  # Default weights for objective function components
-        theme_preferences=None,  # Theme preferences (1-10 scale for each theme)
+        theme_preference="tourism",  # Theme preference
         budget_level=5,  # 1-10 scale (1=budget, 10=luxury)
         max_daily_spending=200,  # in chosen currency
         trip_duration_days=7,  # Trip constraints
@@ -44,12 +44,7 @@ class UserPreferences:
             "daily_pace": 0.2        # Preference for comfortable daily schedule
         }
 
-        self.theme_preferences = theme_preferences or {
-            "education": 5,  # Schools, colleges, universities
-            "healthcare": 5,  # Hospitals, clinics
-            "tourism": 5,  # Attractions, museums
-            "religious": 5  # Churches, mosques, synagogues
-        }
+        self.theme_preference = theme_preference or "tourism"
 
         self.budget_level = budget_level
         self.max_daily_spending = max_daily_spending
@@ -93,5 +88,5 @@ def generate_route_config_from_user_preferences(user_preferences = UserPreferenc
 
     route_config = RouteConfig(max_pois=max_pois,
                                time_budget=time_budget,
-                               daily_capacity=daily_capacity)
+                               daily_capacity=daily_capacity, theme=user_preferences.theme_preference)
     return route_config
