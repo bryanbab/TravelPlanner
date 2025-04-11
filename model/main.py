@@ -2,6 +2,8 @@
 import math
 from geopy.geocoders import Nominatim
 from shapely.geometry import Point, Polygon, LineString, MultiPolygon
+from shapely.ops import unary_union
+
 from .theme_meta import THEMES
 from .config_generator import *
 import overpass
@@ -14,6 +16,7 @@ import time
 
 
 # ==== GEOCODING UTILITIES ====
+buffer_counter = 0
 poi_manager = POIQueryManager()
 geolocator = Nominatim(
     user_agent="travel_annealing",
@@ -22,7 +25,8 @@ geolocator = Nominatim(
 )
 
 overpass_url = "http://localhost:12347/api/interpreter"
-osrm_url = "http://localhost:5050/route/v1/driving/"
+osrm_trip_url = "http://localhost:5050/trip/v1/driving/"
+osrm_route_url = "http://localhost:5050/route/v1/driving/"
 
 foursquare_url = "https://api.foursquare.com/v3/places/"
 foursquare_api_key = "fsq3njJtNwJ9wE2dqmle63teUelN7qkwSzqrSKDGhg0mQg8="
@@ -52,7 +56,7 @@ def generate_random_point_within(polygon):
 # ==== ROUTE GEOMETRY HANDLING ====
 def get_route_geometry(start_coord, end_coord):
     """Get actual road route geometry using OSRM"""
-    url = f"{osrm_url}{start_coord[0]},{start_coord[1]};{end_coord[0]},{end_coord[1]}?overview=full&geometries=geojson"
+    url = f"{osrm_route_url}{start_coord[0]},{start_coord[1]};{end_coord[0]},{end_coord[1]}?overview=full&geometries=geojson"
     try:
         response = requests.get(url).json()
         if response["code"] == "Ok":
@@ -97,10 +101,22 @@ def generate_route(start, end, pois, daily_capacity):
     coords.append(end)
 
     coord_str = ";".join(f"{lon},{lat}" for lon, lat in coords)
-    url = f"{osrm_url}{coord_str}?overview=full"
+    url = f"{osrm_route_url}{coord_str}?overview=full"
     try:
         response = requests.get(url).json()
-        return response["routes"][0] if response["code"] == "Ok" else None
+        if response["code"] == "Ok":
+            route_info = response["routes"][0]
+
+            waypoints = response['waypoints']
+            latlon_list = []
+            # Convert [lon, lat] to [lat, lon]
+            for waypoint in waypoints:
+                if "location" in waypoint:
+                    lon, lat = waypoint["location"]
+                    latlon_list.append([lat, lon])
+        else:
+            route_info, latlon_list = None, None
+        return route_info, latlon_list
     except:
         return None
 
@@ -114,54 +130,58 @@ def generate_random_route_and_poll_pois(start, end, config=RouteConfig()):
 
     all_pois = poll_pois_from_route_using_segments(route_line, config)
     poi_subset = sample_pois(all_pois, config.min_pois, config.max_pois)
-    final_route = generate_route(start, end, poi_subset, config.daily_capacity)
-    return final_route, poi_subset
+    final_route, waypoints = generate_route(start, end, poi_subset, config.daily_capacity)
+    return final_route, waypoints
 
 
 def poll_pois_from_route_using_segments(route_line, config):
     # Query POIs along entire route
     all_pois = []
     current_buffer_union = None
+    segment_buffers = []
     segments = split_route_into_segments(route_line, config.segment_km)
+
+
 
     for segment in segments:
         # Create buffer for current segment
         buffer_deg = config.buffer_km * 1000 / 111320  # Approximate degree conversion
         segment_buffer = segment.buffer(buffer_deg)
+        segment_buffers.append(segment_buffer)
 
-        # First segment or no previous querying
-        if current_buffer_union is None:
-            current_buffer_union = segment_buffer
-        else:
-            # Union with existing buffer
-            current_buffer_union = current_buffer_union.union(segment_buffer)
+    current_buffer_union = unary_union(segment_buffers)
+
+    try:
+        global buffer_counter
+        display_util.write_buffers_to_map(poi_manager.previously_queried_area,
+                                          current_buffer_union,
+                                          output_path="./visualmaps/buffers/"+str(buffer_counter))
+        buffer_counter += 1
+    except Exception as ex:
+        print(ex)
+        print("failed to write buffers to map")
 
     # First run case
     if poi_manager.previously_queried_area is None:
         print("Initial query for full buffer area...")
         all_pois = query_pois_for_area(current_buffer_union, config.theme)
         poi_manager.previously_queried_area = current_buffer_union
+        poi_manager.cached_pois = all_pois
 
-        # Generate final route
-        return all_pois
-
-    try:
-        display_util.write_buffers_to_map(poi_manager.previously_queried_area, current_buffer_union)
-    except Exception as e:
-        print(e)
     # Handle buffer changes - both growing and shrinking
 
     # 1. Handle new areas (buffer growth)
-    if not current_buffer_union.within(poi_manager.previously_queried_area):
+    elif not poi_manager.previously_queried_area.contains(current_buffer_union):
         new_area = current_buffer_union.difference(poi_manager.previously_queried_area)
 
-        if not new_area.is_empty and new_area.area > 0.0000001:  # Small threshold to avoid tiny fragments
+        if not new_area.is_empty and new_area.area > 0.001:  # Small threshold to avoid tiny fragments
             print(f"Querying new buffer areas...")
             new_pois = query_pois_for_area(new_area, config.theme)
             all_pois.extend(new_pois)
+            poi_manager.previously_queried_area = poi_manager.previously_queried_area.union(current_buffer_union)
 
         # 2. Handle areas where buffer has decreased
-    if not poi_manager.previously_queried_area.within(current_buffer_union):
+    elif current_buffer_union.within(poi_manager.previously_queried_area):
         print("Buffer has decreased in some areas, filtering POIs...")
 
         # Option 1: Filter from cached POIs (more efficient)
@@ -171,32 +191,23 @@ def poll_pois_from_route_using_segments(route_line, config):
 
             # Filter to keep only POIs that are still within current buffer
             valid_pois = []
+            poi_coords_set = set()
             for poi in cached_pois:
                 point = Point(poi)
                 if current_buffer_union.contains(point):
                     valid_pois.append(poi)
-                    if poi not in all_pois:
-                        all_pois.append(poi)
 
-            # Alternative approach: Replace cached_pois with only valid ones
-            # cached_pois = valid_pois
-
+            all_pois =  valid_pois
         # Option 2: Re-query the entire current buffer (less efficient, but guarantees accuracy)
         else:
             print("No cached POIs available, re-querying entire buffer...")
             all_pois = query_pois_for_area(current_buffer_union, config.theme)
+            poi_manager.cached_pois = all_pois
     else:
         # If no part of the buffer decreased, get POIs from cache that are in current buffer
-        cached_pois = poi_manager.get_cached_pois()
-        if cached_pois:
-            from shapely.geometry import Point
+        all_pois =  poi_manager.get_cached_pois()
 
-            for poi in cached_pois:
-                point = Point(poi)
-                if current_buffer_union.contains(point) and poi not in all_pois:
-                    all_pois.append(poi)
-
-        # Update the previously queried area to be the current buffer
+    # Update the previously queried area to be the current buffer
     poi_manager.previously_queried_area = current_buffer_union
 
     print(f"Returning {len(all_pois)} POIs for current buffer")
@@ -263,7 +274,7 @@ def query_pois_for_polygon(polygon, theme):
 
 
 # ==== SIMULATED ANNEALING UTILITIES ====
-def neighbor_function(current_config, time_percentage):
+def neighbor_function(current_config, time_percentage, temperature):
     """
     Generate a slightly modified configuration based on the current state
 
@@ -280,24 +291,48 @@ def neighbor_function(current_config, time_percentage):
     """
     new_config = copy.deepcopy(current_config)
 
-    # Temperature-dependent exploration factor
-    # Early in annealing: bigger changes, Later: smaller changes
-    exploration_factor = random.uniform(0.5, 1.5)
+    # Scale temperature to a range [0, 1] as it decreases
+    scaled_temperature = max(0, min(1, temperature / 100))
+
+    # Use the scaled temperature to decrease the exploration factor from 1.5 to 0.5
+    exploration_factor = 1.5 - scaled_temperature * (
+        1.0)  # This line ensures the factor starts at 1.5 and decreases
+
+    # Use random.uniform to add variation within the range 0.5 to 1.5
+    exploration_factor += random.uniform(0, 0.5)
 
     # Adjust buffer based on time percentage
     # If we're under budget (negative percentage), we can increase buffer to find more POIs
     # If we're over budget, we should decrease buffer to reduce POIs
     buffer_adjustment = 0.0
+    buffer_sample_chance = random.randint(1,100)
 
     if time_percentage < -10:  # Significantly under time budget
-        # Increase buffer to find more POIs - more conservative increase
-        buffer_adjustment = random.uniform(0.1, 0.5) * exploration_factor
+        # Increase buffer to find more POIs - more conservative increase.
+        # 75% chance of adjusting polling rate, 10% chance of changing buffer size
+        if buffer_sample_chance >= 10:
+            increase = new_config.max_pois + 1
+            if increase <= new_config.daily_capacity:
+                new_config.max_pois = increase
+            else:
+                buffer_adjustment = random.uniform(0.1, 0.5) * exploration_factor
+        else:
+            buffer_adjustment = random.uniform(0.1, 0.5) * exploration_factor
+
     elif time_percentage > 10:  # Significantly over time budget
         # Decrease buffer to reduce number of POIs - more conservative decrease
-        buffer_adjustment = random.uniform(-0.5, -0.1) * exploration_factor
+        # Similar to increase function, with decrement logic
+        if buffer_sample_chance >= 25:
+            decrease = new_config.max_pois - 1
+            if decrease <= new_config.min_pois:
+                new_config.max_pois = decrease
+            else:
+                buffer_adjustment = random.uniform(-0.5, -0.1) * exploration_factor
+        else:
+            buffer_adjustment = random.uniform(-0.5, -0.1) * exploration_factor
     else:
         # Near target budget, make smaller adjustments
-        buffer_adjustment = random.uniform(-0.2, 0.2) * exploration_factor
+        buffer_adjustment = random.uniform(-0.05, 0.05) * exploration_factor
 
     # Apply buffer adjustment with bounds checking
     new_buffer = new_config.buffer_km + buffer_adjustment
@@ -308,12 +343,8 @@ def neighbor_function(current_config, time_percentage):
         segment_adjustment = random.choice([-2, -1, 1, 2])
         new_config.segment_km = max(5, min(new_config.segment_km + segment_adjustment, 25))
 
-    if random.random() < 0.05:  # 5% chance to adjust daily capacity
-        capacity_adjustment = random.choice([-1, 1])
-        new_config.daily_capacity = max(1, min(new_config.daily_capacity + capacity_adjustment, 8))
-
     # Occasionally change theme (less frequently)
-    if random.random() < 0.05:  # 5% chance
+    if random.random() < 0.005:  # 0.5% chance
         new_config.theme = random.choice(list(THEMES.keys()))
 
     return new_config
@@ -352,7 +383,7 @@ def get_poi_rating(place_id):
 def get_all_ratings(pois):
     ratings = []
 
-    for lon, lat in pois:
+    for lat, lon in pois:
         place_id = get_poi_id(lat, lon)
         if place_id:
             #TODO: REMOVE IN FINAL LOOP
@@ -420,7 +451,7 @@ def calculate_time_score(route, pois, config):
     - time_percentage: Percentage difference from budget
     """
     # Time budget in seconds
-    time_budget = config.time_budget * 60 * 60  # Convert hours to seconds
+    time_budget = config.time_budget
 
     # Calculate travel time
     travel_time = route.get('duration', 0)  # Route travel time in seconds
@@ -448,7 +479,7 @@ def calculate_time_score(route, pois, config):
 def time_spent_in_pois(pois):
     poi_time = 0
     for poi in pois:
-        poi_time += random.randint(1,3) * 60
+        poi_time += random.randint(1,3) * 60 * 60 #Convert time spent to seconds
     return poi_time
 
 # returns the length of the route in meters (shorter is better)
@@ -500,19 +531,18 @@ def calculate_score(route, config, pois):
 
         # Time budget adherence
         time_diff, time_percentage = calculate_time_score(route, pois, config)
-        time_budget = config.time_budget * 60  # convert to seconds
-        time_score = abs(time_diff) / (time_budget / 4)  # Normalized score
+        time_budget = config.time_budget
+        time_score = abs(time_diff) / (time_budget / 5)  # Normalized score
 
-        # POI count component - reward routes with appropriate number of POIs
-        ideal_poi_count = (config.time_budget * 60) / (120 * 60)  # 1 POI per 2 hours is ideal
-        poi_count_score = abs(len(pois) - ideal_poi_count) * 2.0
+        # POI count component - reward routes with appropriate number of POIs, maximize number of POIs user wants to visit
+        poi_count_score = abs(len(pois) - config.max_pois)
 
         # Weight the components and combine for final score (lower is better)
         weighted_score = (
-                rating_score * 0.35 +  # 35% weight for quality
-                geographic_score * 0.25 +  # 25% weight for distribution
-                time_score * 0.30 +  # 30% weight for time adherence
-                poi_count_score * 0.10  # 10% weight for appropriate POI count
+                rating_score * 0.30 +  # 30% weight for quality
+                geographic_score * 0.15 +  # 15% weight for distribution
+                time_score * 0.40 +  # 40% weight for time adherence
+                poi_count_score * 0.15  # 15% weight for appropriate POI count
         )
 
         print(f"Score components - Rating: {rating_score:.2f}, Geographic: {geographic_score:.2f}, "
@@ -579,7 +609,7 @@ def simulated_annealing(pois, start_coord, end_coord, route, config=RouteConfig(
            non_improving_iterations < max_non_improving):
 
         # Generate a neighbor solution
-        new_config = neighbor_function(current_config, time_percentage)
+        new_config = neighbor_function(current_config, time_percentage, temperature)
         new_route, new_pois = generate_random_route_and_poll_pois(start_coord, end_coord,
                                                                   new_config)
 
@@ -594,7 +624,7 @@ def simulated_annealing(pois, start_coord, end_coord, route, config=RouteConfig(
 
         # Decide whether to accept the new solution
         # For maximization problems (higher score is better)
-        delta = new_score - current_score
+        delta = current_score - new_score
 
         if delta > 0 or random.random() < math.exp(delta / temperature):
             # Accept the new solution
@@ -607,19 +637,8 @@ def simulated_annealing(pois, start_coord, end_coord, route, config=RouteConfig(
             # Record for visualization
             visualizer.append(current_route)
 
-            try:
-                display_util.write_to_map_using(current_route['geometry'])
-            except Exception as e:
-                print(f"Visualization error: {e}")
-
             # Update best solution if needed
-            # For maximization problems (higher score is better)
-            route_line = LineString(current_pois)
-            #
-            # # Create sample buffers
-            # current_buffer = route_line.buffer(0.01)  # Current buffer around route
-            # previous_buffer = route_line.buffer(0.005)  # Previous buffer around route
-            if current_score > best_score:
+            if current_score < best_score:
                 best_route = current_route
                 best_config = copy.deepcopy(current_config)
                 best_pois = current_pois
@@ -627,17 +646,9 @@ def simulated_annealing(pois, start_coord, end_coord, route, config=RouteConfig(
                 non_improving_iterations = 0
                 print(f"Iteration {iteration}: New best score = {best_score:.4f}")
 
-                try:
-                    display_util.write_to_map_with_waypoints(best_route['geometry'], best_pois, good=True)
-                except Exception as e:
-                    print(f"Final visualization error: {e}")
             else:
                 non_improving_iterations += 1
 
-            try:
-                display_util.write_to_map_with_waypoints(current_route['geometry'], current_pois, bad=True)
-            except Exception as e:
-                print(f"Final visualization error: {e}")
         else:
             # Reject the solution
             non_improving_iterations += 1
@@ -653,6 +664,11 @@ def simulated_annealing(pois, start_coord, end_coord, route, config=RouteConfig(
         # Cool down the temperature
         temperature *= cooling_rate
         iteration += 1
+        try:
+            display_util.write_to_map_using_waypoints(current_route['geometry'],path="./visualmaps/bad/"+str(iteration), waypoints=best_pois, start_coord=(start_coord[1],start_coord[0]), end_coord=(end_coord[1],end_coord[0]))
+            display_util.write_to_map_using(current_route['geometry'])
+        except Exception as e:
+            print(f"Failed to display route: {e}")
 
         # Log progress periodically
         if iteration % 10 == 0:
@@ -667,12 +683,8 @@ def simulated_annealing(pois, start_coord, end_coord, route, config=RouteConfig(
     elif non_improving_iterations >= max_non_improving:
         print(f"Stopped: No improvement for {max_non_improving} iterations")
 
-    # Visualize optimization path
-    try:
-        display_util.write_multiple_routes_to_map(visualizer)
-    except Exception as e:
-        print(f"Final visualization error: {e}")
-
+    print(f"Final Config: {best_config}")
+    print(f"Final Time %: {time_percentage}%")
     print(f"Final best score: {best_score:.4f}")
     print(f"Iterations run: {iteration}")
 

@@ -4,13 +4,13 @@ import random
 class RouteConfig:
     def __init__(
         self,
-        buffer_km=15,           # Search corridor width
+        buffer_km=3,           # Search corridor width
         min_pois=2,             # Minimum POIs per route
         max_pois=8,             # Maximum POIs per route
         daily_capacity=3,       # Stops per day simulation
-        segment_km=16,          # Route splitting granularity
+        segment_km=5,          # Route splitting granularity
         theme="tourism",        # Default theme
-        time_budget=12          # Exploration tolerance
+        time_budget=8 *60 * 60          # Exploration tolerance
     ):
         self.buffer_km = buffer_km      # parameterized
         self.min_pois = min_pois        # default value
@@ -18,7 +18,7 @@ class RouteConfig:
         self.daily_capacity = daily_capacity    # user defined
         self.segment_km = segment_km    # parameterized
         self.theme = theme              # user defined
-        self.time_budget = 12           # calculated from user parameters
+        self.time_budget = time_budget           # calculated from user parameters, stored in seconds
 
 
 class UserPreferences:
@@ -83,7 +83,7 @@ class POIQueryManager:
 
 def generate_route_config_from_user_preferences(user_preferences = UserPreferences()):
     max_pois = user_preferences.max_daily_pois * user_preferences.trip_duration_days
-    time_budget = int(user_preferences.trip_duration_days * user_preferences.max_daily_driving_hours * user_preferences.roam_level)
+    time_budget = int(user_preferences.trip_duration_days * user_preferences.max_daily_driving_hours * user_preferences.roam_level) * 60 * 60 #convert to seconds
     daily_capacity = user_preferences.max_daily_pois
 
     route_config = RouteConfig(max_pois=max_pois,

@@ -1,18 +1,13 @@
-import folium
-import polyline
-
-import random
 import string
 from datetime import datetime
 
 from shapely.geometry import LineString, MultiPolygon, Polygon
+import folium
+import polyline
+import random
 
-from folium.features import DivIcon
 
-import os
-
-
-def write_to_map_using(encoded_polyline):
+def write_to_map_using(encoded_polyline, path = "./visualmaps/good/"):
 
     # Decode the polyline to get coordinates
     coordinates = polyline.decode(encoded_polyline)
@@ -24,52 +19,77 @@ def write_to_map_using(encoded_polyline):
     folium.PolyLine(locations=coordinates, color="blue", weight=5).add_to(m)
 
     # Save the map to an HTML file
-    m.save("./visualmaps/"+generate_html_filename())
-
-def write_route_with_buffer(encoded_polyline):
-    return None
+    m.save(path+generate_html_filename())
 
 
-def write_to_map_with_waypoints(encoded_polyline, waypoints=None, good = False, bad = False):
+def generate_html_filename():
+    return f"map_{random.randint(1000, 9999)}.html"
+
+
+def write_to_map_using_waypoints(encoded_polyline=None, waypoints=None, start_coord=None,
+                                 end_coord=None, path="./visualmaps/good/"):
     """
-    Create a map with the route and waypoints.
-
-    Args:
-        encoded_polyline (str): Google encoded polyline string
-        waypoints (list, optional): List of waypoints as [(lat, lng, name), ...]
-                                    where name is a string description
+    Create a map visualizing the decoded polyline and waypoints.
     """
-    # Decode the polyline to get coordinates
-    coordinates = polyline.decode(encoded_polyline)
 
-    # Create a map centered around the first point of the route
-    m = folium.Map(location=coordinates[0], zoom_start=13)
+    # Determine the center point for the map
+    if encoded_polyline:
+        decoded_points = polyline.decode(encoded_polyline)
+        center = decoded_points[0] if decoded_points else [0, 0]
+    elif start_coord:
+        center = start_coord
+    else:
+        center = [0, 0]  # Fallback
 
-    # Add the route as a polyline to the map
-    folium.PolyLine(coordinates, color="blue", weight=5).add_to(m)
+    # Create a map centered around the determined point
+    m = folium.Map(location=center, zoom_start=13)
 
-    # Add markers for each waypoint
+    # Draw the polyline route if provided
+    if encoded_polyline:
+        decoded_points = polyline.decode(encoded_polyline)
+        folium.PolyLine(
+            locations=decoded_points,
+            color="blue",
+            weight=4,
+            opacity=0.8,
+            tooltip="Route"
+        ).add_to(m)
+
+    # Add start marker if provided
+    if start_coord:
+        folium.Marker(
+            location=start_coord,
+            popup="Start",
+            tooltip="Start",
+            icon=folium.Icon(color="green", icon="play-circle", prefix="fa")
+        ).add_to(m)
+
+    # Add waypoint markers
     if waypoints:
-        for lat, lng, name in waypoints:
+        for idx, wp in enumerate(waypoints):
             folium.Marker(
-                location=[lat, lng],
-                popup=name,
-                icon=folium.Icon(color='red', icon='info-sign')
+                location=wp,
+                popup=f"Waypoint {idx + 1}",
+                tooltip=f"{idx + 1}",
+                icon=folium.Icon(color="blue", icon="flag", prefix="fa")
             ).add_to(m)
 
-    # Save the map to an HTML file
-    filename = generate_html_filename()
-    if good:
-        m.save("./visualmaps/good/" + filename)
-    elif bad:
-        m.save("./visualmaps/bad/" + filename)
-    else:
-        m.save("./visualmaps/" + filename)
+    # Add end marker if provided
+    if end_coord:
+        folium.Marker(
+            location=end_coord,
+            popup="End",
+            tooltip="End",
+            icon=folium.Icon(color="red", icon="stop-circle", prefix="fa")
+        ).add_to(m)
 
-    return filename
+    # Save the map
+    m.save(path + generate_html_filename())
+
+    return m
 
 
-def write_buffers_to_map(buffer1=None, buffer2=None, output_path="./visualmaps/"):
+def write_buffers_to_map(buffer1=None, buffer2=None, output_path="./visualmaps/buffers/"):
     """
     Visualizes two optional Shapely buffer geometries independently on a Folium map,
     without merging them. Each buffer is shown in a different color.
@@ -104,7 +124,7 @@ def write_buffers_to_map(buffer1=None, buffer2=None, output_path="./visualmaps/"
     print(f"Map saved to {full_path}")
 
 
-def write_multiple_routes_to_map(encoded_polylines, output_file="osrm_route_map.html"):
+def write_multiple_routes_to_map(encoded_polylines, output_file="./visualmaps/osrm_route_map.html"):
     if not encoded_polylines:
         raise ValueError("No routes provided.")
 
