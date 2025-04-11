@@ -1,35 +1,16 @@
-import streamlit as st
-from model.config_generator import UserPreferences, RouteConfig, generate_route_config_from_user_preferences
-from model.main import geocode_city, generate_random_point_within, get_city_bounds, generate_random_route_and_poll_pois, simulated_annealing
-from model.theme_meta import THEMES
-import folium
+from model.config_generator import UserPreferences, generate_route_config_from_user_preferences
+from model.main import (geocode_city, generate_random_point_within, get_city_bounds,
+                        generate_random_route_and_poll_pois, simulated_annealing)
+from gui_utils import generate_itinerary, write_to_map_using, write_to_map_using_waypoints
 from streamlit_folium import st_folium
-import polyline
+from model.theme_meta import THEMES
+import streamlit as st
 
-# create a map from a polyline
-def write_to_map_using(encoded_polyline):
-    try:
-        # Decode the polyline to get coordinates
-        coordinates = polyline.decode(encoded_polyline)
-    except Exception as e:
-        st.error(f"Unable to decode polyline: {e}")
-        return None
-
-    # Create a map centered around the first point of the route
-    m = folium.Map(location=coordinates[0], zoom_start=13)
-
-    # Add the route as a polyline to the map
-    folium.PolyLine(coordinates, color="blue", weight=5).add_to(m)
-
-    return m
-
-# title of gui
 st.title("Travel Route Generator")
 
 # ALL USER INPUTS
-
 # start and end city
-start_city = st.text_input("Start Location", "Boston")
+start_city = st.text_input("Start Location", "Boston MA")
 end_city = st.text_input("End Location (optional)", "")
 
 
@@ -37,7 +18,6 @@ end_city = st.text_input("End Location (optional)", "")
 st.sidebar.header("🧭 Plan Your Adventure")
 
 # Questions for weights
-
 # distance
 max_distance = st.sidebar.slider(
     "🚗 What's the max distance you're willing to drive per day (km)?",
@@ -198,23 +178,30 @@ if run_button:
                     else:
                         best_route, _, best_pois = simulated_annealing(pois, start_coord, end_coord, route, config)
 
-                        st.session_state.route_data = (best_route, best_pois)  # Store route data in session state
+                        # store route data in session state to display map
+                        st.session_state.route_data = (best_route, best_pois, start_coord, end_coord)
                         st.success("Route generated!")
 
                         # show route using folium
                         poi_coors = [{"lon": lon, "lat": lat} for lon, lat in pois]
                         if best_route:
-                            map_folium = write_to_map_using(encoded_polyline=best_route["geometry"])
+                            map_folium = write_to_map_using_waypoints(encoded_polyline=best_route["geometry"],
+                                                                      waypoints=best_pois,
+                                                                      start_coord=(start_coord[1], start_coord[0]),
+                                                                      end_coord=(end_coord[1], end_coord[0]))
                             st_folium(map_folium, width=725)
 
             except Exception as e:
                 st.error(f"Error: {e}")
 
 elif st.session_state.route_data:
-    best_route, best_pois = st.session_state.route_data
+    best_route, best_pois, start_coord, end_coord = st.session_state.route_data
 
     if best_route:
-        map_folium = write_to_map_using(encoded_polyline=best_route["geometry"])
+        map_folium = write_to_map_using_waypoints(encoded_polyline=best_route["geometry"], waypoints=best_pois,
+                                                  start_coord=(start_coord[1],start_coord[0]), end_coord=(end_coord[1],end_coord[0]))
         st_folium(map_folium, width=725)
-        st.write(best_pois)
+        st.header("Your Itinerary")
+        st.write(generate_itinerary(best_pois, selected_theme, best_route["legs"]))
+        print(generate_itinerary(best_pois, selected_theme, best_route["legs"]))
 
