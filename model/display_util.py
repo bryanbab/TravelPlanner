@@ -1,13 +1,13 @@
 import string
 from datetime import datetime
-
 from shapely.geometry import LineString, MultiPolygon, Polygon
 import folium
 import polyline
 import random
 
-
-def write_to_map_using(encoded_polyline, path = "./visualmaps/good/"):
+# === UTILS TO SAVE MAPS FOR DEBUGGING AND VISUALIZATION ===
+# creates a map with just a route
+def write_to_map_using(encoded_polyline, path):
 
     # Decode the polyline to get coordinates
     coordinates = polyline.decode(encoded_polyline)
@@ -26,12 +26,9 @@ def generate_html_filename():
     return f"map_{random.randint(1000, 9999)}.html"
 
 
+# create a map visualizing the decoded polyline and waypoints.
 def write_to_map_using_waypoints(encoded_polyline=None, waypoints=None, start_coord=None,
                                  end_coord=None, path="./visualmaps/good/"):
-    """
-    Create a map visualizing the decoded polyline and waypoints.
-    """
-
     # Determine the center point for the map
     if encoded_polyline:
         decoded_points = polyline.decode(encoded_polyline)
@@ -88,12 +85,9 @@ def write_to_map_using_waypoints(encoded_polyline=None, waypoints=None, start_co
 
     return m
 
-
+# Visualizes two optional Shapely buffer geometries independently on a Folium map,
+# without merging them. Each buffer is shown in a different color.
 def write_buffers_to_map(buffer1=None, buffer2=None, output_path="./visualmaps/buffers/"):
-    """
-    Visualizes two optional Shapely buffer geometries independently on a Folium map,
-    without merging them. Each buffer is shown in a different color.
-    """
     if not buffer1 and not buffer2:
         raise ValueError("At least one buffer must be provided.")
 
@@ -123,7 +117,7 @@ def write_buffers_to_map(buffer1=None, buffer2=None, output_path="./visualmaps/b
     m.save(full_path)
     print(f"Map saved to {full_path}")
 
-
+# creates a map with multiple routes
 def write_multiple_routes_to_map(encoded_polylines, output_file="./visualmaps/osrm_route_map.html"):
     if not encoded_polylines:
         raise ValueError("No routes provided.")
@@ -146,7 +140,7 @@ def write_multiple_routes_to_map(encoded_polylines, output_file="./visualmaps/os
 
     m.save(output_file)
 
-
+# generates an html file name
 def generate_html_filename():
     # Generate random string (8 characters)
     random_chars = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))

@@ -81,6 +81,7 @@ class POIQueryManager:
         """Get all cached POIs"""
         return self.cached_pois
 
+# generates a route based on above user preferences
 def generate_route_config_from_user_preferences(user_preferences = UserPreferences()):
     max_pois = user_preferences.max_daily_pois * user_preferences.trip_duration_days
     time_budget = int(user_preferences.trip_duration_days * user_preferences.max_daily_driving_hours * user_preferences.roam_level) * 60 * 60 #convert to seconds

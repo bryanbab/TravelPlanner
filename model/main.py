@@ -3,7 +3,6 @@ import math
 from geopy.geocoders import Nominatim
 from shapely.geometry import Point, Polygon, LineString, MultiPolygon
 from shapely.ops import unary_union
-
 from .theme_meta import THEMES
 from .config_generator import *
 import overpass
@@ -27,15 +26,13 @@ geolocator = Nominatim(
 overpass_url = "http://localhost:12347/api/interpreter"
 osrm_trip_url = "http://localhost:5050/trip/v1/driving/"
 osrm_route_url = "http://localhost:5050/route/v1/driving/"
-
 foursquare_url = "https://api.foursquare.com/v3/places/"
-foursquare_api_key = "fsq3njJtNwJ9wE2dqmle63teUelN7qkwSzqrSKDGhg0mQg8="
+foursquare_api_key = "YOUR_API_KEY_HERE"
 
 # returns a city's geographical coordinates (lon, lat)
 def geocode_city(city_name):
     location = geolocator.geocode(city_name)
     return (location.longitude, location.latitude) if location else None
-
 
 # returns a polygon that represents the geographical boundary of a city
 def get_city_bounds(city_name):
@@ -43,7 +40,6 @@ def get_city_bounds(city_name):
     if location and 'geojson' in location.raw:
         return Polygon(location.raw['geojson']['coordinates'][0])
     return None
-
 
 # generates a random point within a given polygon's boundary
 def generate_random_point_within(polygon):
@@ -54,6 +50,7 @@ def generate_random_point_within(polygon):
             return (point.x, point.y)
 
 # ==== ROUTE GEOMETRY HANDLING ====
+#  gets the drivable route between two coordinates using OSRM and returns it as a LineString for further analysis
 def get_route_geometry(start_coord, end_coord):
     """Get actual road route geometry using OSRM"""
     url = f"{osrm_route_url}{start_coord[0]},{start_coord[1]};{end_coord[0]},{end_coord[1]}?overview=full&geometries=geojson"
@@ -65,13 +62,14 @@ def get_route_geometry(start_coord, end_coord):
     except:
         return None
 
-
+# divides a route into evenly spaced segments to enable localized POI querying along the path
 def split_route_into_segments(route, segment_length_km=16):
     """Split route into manageable segments"""
     segment_length = segment_length_km * 1000  # meters
     return [LineString([route.interpolate(i), route.interpolate(i + segment_length)])
             for i in np.arange(0, route.length, segment_length)]
 
+# randomly selects a number of POIs within a specified range to include in the final itinerary
 def sample_pois(pois, min_pois, max_pois):
     """Random selection with constraints"""
     num_pois = len(pois)
@@ -90,6 +88,8 @@ def sample_pois(pois, min_pois, max_pois):
 
 
 # ==== ROUTE GENERATION ====
+# Constructs a full route with daily POI groupings between a start and end point
+# # returns both the route data and the ordered list of waypoints
 def generate_route(start, end, pois, daily_capacity):
     """Create route with daily stop simulation"""
     random.shuffle(pois)
@@ -122,8 +122,10 @@ def generate_route(start, end, pois, daily_capacity):
 
 
 # ==== MAIN WORKFLOW ====
+# generates a complete route with waypoints by first identifying relevant POIs along a base route
+# and then sampling a subset based on user configuration
 def generate_random_route_and_poll_pois(start, end, config=RouteConfig()):
-    #Do not geo code in this method, causes api timeout (start and end needs to be coordinates)
+    #NOTE: Do not geocode in this method, causes api timeout (start and end needs to be coordinates)
     # Get base route
     route_line = get_route_geometry(start, end)
     if not route_line: return None
@@ -133,15 +135,14 @@ def generate_random_route_and_poll_pois(start, end, config=RouteConfig()):
     final_route, waypoints = generate_route(start, end, poi_subset, config.daily_capacity)
     return final_route, waypoints
 
-
+# retrieves POIs located within buffered segments of a route, accounting for previously
+# queried areas to avoid redundant API calls.
 def poll_pois_from_route_using_segments(route_line, config):
     # Query POIs along entire route
     all_pois = []
     current_buffer_union = None
     segment_buffers = []
     segments = split_route_into_segments(route_line, config.segment_km)
-
-
 
     for segment in segments:
         # Create buffer for current segment
@@ -214,6 +215,7 @@ def poll_pois_from_route_using_segments(route_line, config):
     return all_pois
 
 
+# collects POIs from a given geographic area using theme-based filters
 def query_pois_for_area(area, theme):
     """Query POIs in the given area (which may be MultiPolygon or Polygon)"""
     pois = []
@@ -232,10 +234,10 @@ def query_pois_for_area(area, theme):
 
     return pois
 
-
+# builds and executes a filtered Overpass API query to fetch POIs within a single polygon,
+# constrained by the user’s selected theme.
 def query_pois_for_polygon(polygon, theme):
     """Query POIs for a single polygon area"""
-
     # Get bounding box
     bbox = (polygon.bounds[1], polygon.bounds[0],  # OSM format: (south, west, north, east)
             polygon.bounds[3], polygon.bounds[2])
@@ -386,8 +388,6 @@ def get_all_ratings(pois):
     for lat, lon in pois:
         place_id = get_poi_id(lat, lon)
         if place_id:
-            #TODO: REMOVE IN FINAL LOOP
-            # rating = get_poi_rating(place_id)
             rating = random.randint(1,5)
         else:
             # default if there is no place_id
@@ -475,18 +475,17 @@ def calculate_time_score(route, pois, config):
 
     return time_diff, time_percentage
 
-
+# calculates the time spent at each POI
 def time_spent_in_pois(pois):
     poi_time = 0
     for poi in pois:
-        poi_time += random.randint(1,3) * 60 * 60 #Convert time spent to seconds
+        poi_time += random.randint(1,3) * 60 * 60
     return poi_time
 
 # returns the length of the route in meters (shorter is better)
 def calculate_route_length(pois):
     line = LineString(pois)
     return line.length
-
 
 # calculates a score for a route based on:
 # ratings, geographic distribution, and time_budget

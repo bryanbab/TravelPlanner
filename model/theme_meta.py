@@ -1,3 +1,5 @@
+# === THEMES THAT CORRESPOND TO POIs IN OSM FILES ===
+
 THEMES = {
     "Education": {
         "amenity": ["school", "college", "university", "kindergarten", "library", "public_bookcase"]
