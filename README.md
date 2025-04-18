@@ -1,6 +1,6 @@
 # Travel Planner
 
-Travel Planner is a customizable itinerary generator for road trips. It uses geodata, user preferences, and simulated annealing to build realistic travel plans that balance quality, efficiency, and personal taste.
+This Travel Planner is a customizable itinerary generator for road trips. It uses geodata, user preferences, and simulated annealing to build realistic travel plans that balance quality, efficiency, and personal taste.
 
 ---
 
