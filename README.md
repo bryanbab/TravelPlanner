@@ -47,6 +47,7 @@ PYTHONPATH=.:$PYTHONPATH streamlit run webapp/gui.py
 
 ### 4. Get an itinerary!
 Choose your start & end points, theme, and preferences (optional) and hit Generate Route to see your personalized travel plan!
+<img width="1580" alt="Screenshot 2025-04-18 at 12 56 04" src="https://github.com/user-attachments/assets/47f317e6-db77-4475-986c-7fcb97c5d641" />
 
 ---
 ### Future Improvements
