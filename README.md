@@ -59,7 +59,7 @@ Choose your start & end points, theme, and preferences (optional) and hit Genera
 
 ---
 ### Contributors
-- Bryan Baboolal
-- Chenxi Zhao
-- Pranjal Kanel
-- Xiang Meng
+- **Bryan Baboolal**
+- **Chenxi Zhao**
+- **Pranjal Kanel**
+- **Xiang Meng**
